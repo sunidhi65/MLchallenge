@@ -12,7 +12,7 @@ import joblib
 from ber.blocking import candidate_mapping
 from ber.keyed_blocking import build_keyed_union_candidates
 from ber.config import DEFAULT_RESOURCE_DIR, BlockingConfig, Paths, TrainingConfig
-from ber.decision import tune_decision_rule
+from ber.decision import enforce_bipartite_exclusivity, predictions_from_scores, tune_decision_rule, tune_source_specific_thresholds
 from ber.features import build_pair_features
 from ber.io import SOURCE_COLUMNS, ensure_dirs, read_ground_truth, read_train_source1, truth_dict
 from ber.metrics import blocking_audit, macro_fbeta
@@ -158,24 +158,31 @@ def _evaluate_split(
     candidates: pd.DataFrame,
     probabilities: np.ndarray,
     truths: dict[str, set[str]],
-    threshold: float,
-    cap: int | None,
+    decision_rule: dict[str, object],
 ) -> tuple[dict[str, float], dict[str, list[str]], pd.DataFrame]:
     scored = scored_pairs(candidates, probabilities)
-    params, predictions = tune_decision_rule(
-        scored,
-        truths,
-        split_ids,
-        thresholds=[threshold],
-        caps=[cap],
-    )
+    mode = decision_rule.get("mode", "global")
+    if mode == "source_specific":
+        threshold = {"S2": decision_rule["threshold_s2"], "S3": decision_rule["threshold_s3"]}
+    else:
+        threshold = decision_rule["threshold"]
+
+    predictions = predictions_from_scores(scored, split_ids, threshold, decision_rule["cap"])
+    if decision_rule.get("bipartite"):
+        predictions = enforce_bipartite_exclusivity(predictions, scored)
+
     metrics = {
         f"{split_name}_macro_f05": macro_fbeta(predictions, truths, split_ids, beta=0.5),
         f"{split_name}_predicted_nonempty_rate": sum(bool(predictions.get(sid)) for sid in split_ids)
         / max(len(split_ids), 1),
-        f"{split_name}_threshold": float(params["threshold"]),
-        f"{split_name}_cap": -1.0 if params["cap"] is None else float(params["cap"]),
     }
+    if mode == "source_specific":
+        metrics[f"{split_name}_threshold_s2"] = float(decision_rule["threshold_s2"])
+        metrics[f"{split_name}_threshold_s3"] = float(decision_rule["threshold_s3"])
+    else:
+        metrics[f"{split_name}_threshold"] = float(decision_rule["threshold"])
+    metrics[f"{split_name}_cap"] = -1.0 if decision_rule["cap"] is None else float(decision_rule["cap"])
+    metrics[f"{split_name}_bipartite"] = bool(decision_rule.get("bipartite"))
     return metrics, predictions, scored
 
 
@@ -254,15 +261,33 @@ def run_train_validation(
     tune_scored = scored_pairs(candidates["tune"], tune_prob)
 
     print("Tuning F0.5 decision rule on tune split...")
-    best_params, _ = tune_decision_rule(
+
+    global_params, _ = tune_decision_rule(
         tune_scored,
         truths,
         tune_ids,
         thresholds=training_config.decision_thresholds,
         caps=training_config.max_match_caps,
     )
-    threshold = float(best_params["threshold"])
-    cap = best_params["cap"]
+    global_preds_raw = predictions_from_scores(tune_scored, tune_ids, global_params["threshold"], global_params["cap"])
+    global_preds_bip = enforce_bipartite_exclusivity(global_preds_raw, tune_scored)
+    global_bip_score = macro_fbeta(global_preds_bip, truths, tune_ids, beta=0.5)
+
+    source_params, _ = tune_source_specific_thresholds(
+        tune_scored, truths, tune_ids,
+        thresholds=training_config.decision_thresholds,
+        cap=global_params["cap"],
+        use_bipartite=True
+    )
+
+    candidates_rules = [
+        ("global", global_params["macro_f05"], {"mode": "global", "threshold": global_params["threshold"], "cap": global_params["cap"], "bipartite": False}),
+        ("global_bipartite", global_bip_score, {"mode": "global", "threshold": global_params["threshold"], "cap": global_params["cap"], "bipartite": True}),
+        ("source_specific_bipartite", source_params["macro_f05"], {"mode": "source_specific", "threshold_s2": source_params["threshold_s2"], "threshold_s3": source_params["threshold_s3"], "cap": source_params["cap"], "bipartite": True}),
+    ]
+
+    best_rule_name, best_score, decision_rule = max(candidates_rules, key=lambda x: x[1])
+    print(f"Selected decision rule: {best_rule_name} (score: {best_score:.6f})")
 
     tune_metrics, _, tune_scored = _evaluate_split(
         "tune",
@@ -270,8 +295,7 @@ def run_train_validation(
         candidates["tune"],
         tune_prob,
         truths,
-        threshold,
-        cap,
+        decision_rule,
     )
     holdout_metrics, holdout_predictions, holdout_scored = _evaluate_split(
         "holdout",
@@ -279,8 +303,7 @@ def run_train_validation(
         candidates["holdout"],
         holdout_prob,
         truths,
-        threshold,
-        cap,
+        decision_rule,
     )
 
     _write_predictions(paths.output_dir / "validation_predictions.tsv", holdout_predictions)
@@ -288,7 +311,6 @@ def run_train_validation(
     holdout_scored.to_parquet(paths.output_dir / "holdout_scored_pairs.parquet", index=False)
 
     joblib.dump(model, paths.model_dir / "match_model.joblib")
-    decision_rule = {"threshold": threshold, "cap": cap}
     (paths.model_dir / "decision_rule.json").write_text(json.dumps(decision_rule, indent=2), encoding="utf-8")
     print(f"Wrote model to {paths.model_dir / 'match_model.joblib'} and decision rule to {paths.model_dir / 'decision_rule.json'}")
 
@@ -299,7 +321,7 @@ def run_train_validation(
         "holdout_s1": len(holdout_ids),
         "target_pool_rows": len(targets_norm),
         "target_sample_modulo": training_config.target_sample_modulo,
-        "best_decision_rule": best_params,
+        "best_decision_rule": decision_rule,
         "blocking": audits,
         "tune": tune_metrics,
         "holdout": holdout_metrics,
@@ -312,8 +334,7 @@ def run_train_validation(
         "Validation summary: "
         f"tune_macro_f05={tune_metrics['tune_macro_f05']:.6f}, "
         f"holdout_macro_f05={holdout_metrics['holdout_macro_f05']:.6f}, "
-        f"threshold={threshold:.2f}, "
-        f"cap={'none' if cap is None else cap}"
+        f"rule={best_rule_name}"
     )
     return metrics
 

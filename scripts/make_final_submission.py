@@ -136,7 +136,7 @@ def parse_decision_rule(decision: dict) -> tuple[float | dict, object, bool]:
     transparently."""
     mode = decision.get("mode", "global")
     cap = decision["cap"]
-    bipartite = decision.get("bipartite", False)
+    bipartite = decision.get("bipartite", True)
     if mode == "source_specific":
         threshold: float | dict = {"S2": decision["threshold_s2"], "S3": decision["threshold_s3"]}
     else:
