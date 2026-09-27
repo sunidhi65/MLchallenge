@@ -22,11 +22,11 @@ import time
 from collections import Counter
 from pathlib import Path
 
-REPO = Path("/app")
+REPO = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = REPO / "output_final_v2"
 LOG_PATH = OUTPUT_DIR / "RUN_LOG.md"
 TEST_DIR = REPO / "student_resource" / "dataset" / "test"
-VENV_PYTHON = REPO / ".venv" / "bin" / "python"
+VENV_PYTHON = sys.executable
 
 COUNTRIES = [
     # (normalized_country, raw_country_value, threshold_override, cap_override)
