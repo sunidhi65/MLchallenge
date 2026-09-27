@@ -7,4 +7,7 @@ student_resource/dataset/
 output_final_v2/
 output_final_CRASHED_partial_DO_NOT_USE/
 output_smoketest*/
+output_recall_v3/
+output_v5/
+output_v6/
 *.zip

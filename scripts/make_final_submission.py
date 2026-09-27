@@ -37,7 +37,7 @@ import pandas as pd
 
 from ber.blocking import candidate_mapping, combine_candidate_frames
 from ber.config import BlockingConfig
-from ber.decision import predictions_from_scores
+from ber.decision import enforce_bipartite_exclusivity, predictions_from_scores
 from ber.features import build_pair_features
 from ber.keyed_blocking import build_country_index, score_left_batch
 from ber.modeling import scored_pairs
@@ -129,6 +129,21 @@ def load_country_targets(test_dir: Path, raw_country_values: set[str]) -> pd.Dat
     return targets_norm
 
 
+def parse_decision_rule(decision: dict) -> tuple[float | dict, object, bool]:
+    """Old format: {"threshold": .., "cap": ..}. New (V5) format adds
+    "mode" ("global" or "source_specific") and "bipartite"; old files have
+    neither key and default to global/no-bipartite, so this reads both
+    transparently."""
+    mode = decision.get("mode", "global")
+    cap = decision["cap"]
+    bipartite = decision.get("bipartite", False)
+    if mode == "source_specific":
+        threshold: float | dict = {"S2": decision["threshold_s2"], "S3": decision["threshold_s3"]}
+    else:
+        threshold = decision["threshold"]
+    return threshold, cap, bipartite
+
+
 def process_country(
     country: str,
     left_all: pd.DataFrame,
@@ -136,8 +151,9 @@ def process_country(
     raw_by_norm: dict[str, list[str]],
     config: BlockingConfig,
     model,
-    threshold: float,
+    threshold: float | dict,
     cap,
+    bipartite: bool,
     args: argparse.Namespace,
     matching_path: Path,
     candidate_path: Path,
@@ -199,6 +215,8 @@ def process_country(
                 probs = model.predict_proba(features)
                 scored = scored_pairs(candidates, probs)
                 predictions = predictions_from_scores(scored, batch_ids, threshold, cap)
+                if bipartite:
+                    predictions = enforce_bipartite_exclusivity(predictions, scored)
                 write_rows(matching_path, "matched_entity_ids", [(sid, ",".join(predictions.get(sid, []))) for sid in batch_ids])
                 del features, probs, scored, predictions
             del candidates, cand_map
@@ -235,12 +253,18 @@ def main() -> None:
         print("Loading trained model + decision rule...", flush=True)
         model = joblib.load(args.model_dir / "match_model.joblib")
         decision = json.loads((args.model_dir / "decision_rule.json").read_text())
-        threshold, cap = float(decision["threshold"]), decision["cap"]
+        threshold, cap, bipartite = parse_decision_rule(decision)
         if args.threshold_override is not None:
+            # A manual override always means a single simple global threshold
+            # (this is how France's out-of-distribution safety override is
+            # applied on top of whatever the tuned rule says) -- bipartite
+            # exclusivity is left as the loaded rule set it, since it can
+            # only remove predictions, never add one, so it's safe to keep
+            # even under a conservative manual override.
             threshold = args.threshold_override
         if args.cap_override is not None:
             cap = None if args.cap_override.lower() == "none" else int(args.cap_override)
-        print(f"threshold={threshold}, cap={cap}, batch_size={args.batch_size}", flush=True)
+        print(f"threshold={threshold}, cap={cap}, bipartite={bipartite}, batch_size={args.batch_size}", flush=True)
 
         print("Loading test source1...", flush=True)
         source1 = pd.read_csv(test_dir / "test_source1.tsv", sep="\t", keep_default_na=False, usecols=SOURCE_COLUMNS)
@@ -258,7 +282,7 @@ def main() -> None:
 
         for country in countries:
             process_country(
-                country, source1_norm, test_dir, raw_by_norm, config, model, threshold, cap,
+                country, source1_norm, test_dir, raw_by_norm, config, model, threshold, cap, bipartite,
                 args, matching_path, candidate_path, progress_path, progress,
             )
 

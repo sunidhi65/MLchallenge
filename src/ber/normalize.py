@@ -5,6 +5,11 @@ import unicodedata
 
 import pandas as pd
 
+try:
+    from anyascii import anyascii as _anyascii
+except ImportError:  # pragma: no cover - anyascii is in requirements.txt
+    _anyascii = None
+
 
 LEGAL_FORMS = {
     "inc": "inc",
@@ -125,8 +130,26 @@ def strip_accents(value: str) -> str:
     return "".join(ch for ch in value if not unicodedata.combining(ch))
 
 
+def transliterate(value: str) -> str:
+    """Romanize any script to ASCII (anyascii, ISC license -- not unidecode,
+    which is GPL and unsuitable here).
+
+    ~31% of India's business_name/business_address records (measured via
+    audit_v5.py) contain non-Latin script (Devanagari, Tamil, Telugu,
+    Gujarati, Gurmukhi, Bengali, ...); those can never token- or
+    character-match a Latin-script twin without this step. anyascii also
+    subsumes plain accent-stripping (cafe/café both -> "cafe"), so this
+    replaces strip_accents in the normalization path; strip_accents itself
+    is kept as-is since audit_v5.py relies on its narrower (accent-only)
+    behavior to detect non-Latin script in the first place.
+    """
+    if _anyascii is None:  # pragma: no cover - anyascii is in requirements.txt
+        return strip_accents(value)
+    return _anyascii(str(value))
+
+
 def tokenize(value: str) -> list[str]:
-    value = strip_accents(value).lower().replace("&", " and ")
+    value = transliterate(value).lower().replace("&", " and ")
     return re.findall(r"\w+", value, flags=re.UNICODE)
 
 

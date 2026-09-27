@@ -4,6 +4,8 @@ from difflib import SequenceMatcher
 
 import numpy as np
 import pandas as pd
+from rapidfuzz import fuzz
+from rapidfuzz.distance import JaroWinkler, Levenshtein
 
 from ber.normalize import pipe_set, token_set
 
@@ -23,6 +25,18 @@ def _jaccard(left: set[str], right: set[str]) -> float:
 
 def _overlap_count(left: set[str], right: set[str]) -> int:
     return len(left & right)
+
+
+def _overlap_coefficient(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    return len(left & right) / min(len(left), len(right))
+
+
+def _char_ngrams(value: str, n: int = 3) -> set[str]:
+    if len(value) < n:
+        return {value} if value else set()
+    return {value[i : i + n] for i in range(len(value) - n + 1)}
 
 
 def build_pair_features(
@@ -85,6 +99,21 @@ def build_pair_features(
         s1_landmark = pipe_set(row.s1_landmark_tokens)
         c_landmark = pipe_set(row.cand_landmark_tokens)
 
+        # V5 expanded feature set (see output_v5/V5_RUN_LOG.md Priority 4):
+        # proper edit-distance/phonetic-style metrics via RapidFuzz (the
+        # existing name/address_sequence_ratio above use difflib's
+        # SequenceMatcher, a different and generally weaker metric than
+        # RapidFuzz's C-optimized token_sort/set_ratio, Levenshtein and
+        # Jaro-Winkler), exact-match and structural flags, and composite
+        # name*address signals -- purely additive to every existing feature.
+        name_token_sort = fuzz.token_sort_ratio(s1_name, c_name) / 100.0
+        name_token_set = fuzz.token_set_ratio(s1_name, c_name) / 100.0
+        addr_token_sort = fuzz.token_sort_ratio(s1_addr, c_addr) / 100.0
+        addr_token_set = fuzz.token_set_ratio(s1_addr, c_addr) / 100.0
+        s1_name_first = s1_name.split()[0] if s1_name else ""
+        c_name_first = c_name.split()[0] if c_name else ""
+        first_token_sim = fuzz.ratio(s1_name_first, c_name_first) / 100.0 if s1_name_first and c_name_first else 0.0
+
         feature = {
             "candidate_rank": float(getattr(row, "candidate_rank", 9999)),
             "candidate_strength": float(getattr(row, "candidate_strength", 0.0)),
@@ -116,6 +145,29 @@ def build_pair_features(
             "candidate_name_token_count": float(len(c_name_tokens)),
             "s1_address_token_count": float(len(s1_addr_tokens)),
             "candidate_address_token_count": float(len(c_addr_tokens)),
+            "name_exact_match": float(bool(s1_name) and s1_name == c_name),
+            "address_exact_match": float(bool(s1_addr) and s1_addr == c_addr),
+            "name_levenshtein": Levenshtein.normalized_similarity(s1_name, c_name),
+            "address_levenshtein": Levenshtein.normalized_similarity(s1_addr, c_addr),
+            "name_jaro_winkler": JaroWinkler.similarity(s1_name, c_name),
+            "address_jaro_winkler": JaroWinkler.similarity(s1_addr, c_addr),
+            "name_token_sort_ratio": name_token_sort,
+            "name_token_set_ratio": name_token_set,
+            "address_token_sort_ratio": addr_token_sort,
+            "address_token_set_ratio": addr_token_set,
+            "name_overlap_coefficient": _overlap_coefficient(s1_name_tokens, c_name_tokens),
+            "address_overlap_coefficient": _overlap_coefficient(s1_addr_tokens, c_addr_tokens),
+            "name_length_ratio": (min(len(s1_name), len(c_name)) / max(len(s1_name), len(c_name))) if max(len(s1_name), len(c_name)) else 0.0,
+            "name_prefix4_match": float(len(s1_name) >= 4 and len(c_name) >= 4 and s1_name[:4] == c_name[:4]),
+            "name_char3gram_jaccard": _jaccard(_char_ngrams(s1_name), _char_ngrams(c_name)),
+            "name_first_token_match": float(first_token_sim >= 0.80),
+            "name_first_token_conflict": float(bool(s1_name_first) and bool(c_name_first) and first_token_sim < 0.50),
+            "address_presence": float(bool(c_addr)),
+            "name_addr_sim_product": name_token_sort * addr_token_sort,
+            "name_addr_sim_sum": name_token_sort + addr_token_sort,
+            "name_addr_sim_max": max(name_token_sort, addr_token_sort),
+            "name_addr_sim_min": min(name_token_sort, addr_token_sort),
+            "exact_name_missing_addr": float(bool(s1_name) and s1_name == c_name and not c_addr),
         }
         rows.append(feature)
 
