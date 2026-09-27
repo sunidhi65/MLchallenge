@@ -30,20 +30,22 @@ def train_match_model(features: pd.DataFrame, labels: pd.Series, random_seed: in
     x = features[feature_columns]
     y = labels.astype(int)
 
+    from sklearn.calibration import CalibratedClassifierCV
+
     try:
         from lightgbm import LGBMClassifier
 
         positive = max(int(y.sum()), 1)
         negative = max(int((1 - y).sum()), 1)
         scale_pos_weight = negative / positive
-        model = LGBMClassifier(
+        base_model = LGBMClassifier(
             objective="binary",
-            n_estimators=700,
-            learning_rate=0.035,
-            num_leaves=96,
+            n_estimators=900,
+            learning_rate=0.025,
+            num_leaves=128,
             subsample=0.85,
             colsample_bytree=0.85,
-            min_child_samples=40,
+            min_child_samples=50,
             reg_alpha=0.05,
             reg_lambda=1.0,
             scale_pos_weight=scale_pos_weight,
@@ -52,17 +54,19 @@ def train_match_model(features: pd.DataFrame, labels: pd.Series, random_seed: in
             force_col_wise=True,
             verbose=-1,
         )
+        model = CalibratedClassifierCV(base_model, method="isotonic", cv=3)
     except Exception as lightgbm_error:
         try:
             from sklearn.ensemble import HistGradientBoostingClassifier
 
-            model = HistGradientBoostingClassifier(
+            base_model = HistGradientBoostingClassifier(
                 learning_rate=0.05,
                 max_iter=450,
                 max_leaf_nodes=63,
                 l2_regularization=0.1,
                 random_state=random_seed,
             )
+            model = CalibratedClassifierCV(base_model, method="isotonic", cv=3)
         except ModuleNotFoundError as exc:
             raise ModuleNotFoundError(
                 "Install requirements.txt. The matcher needs lightgbm or scikit-learn."
