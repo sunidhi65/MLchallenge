@@ -27,7 +27,6 @@ import argparse
 import contextlib
 import gc
 import json
-import resource
 import sys
 import time
 from pathlib import Path
@@ -62,9 +61,16 @@ def parse_args() -> argparse.Namespace:
 
 
 def peak_rss_gb() -> float:
-    # ru_maxrss is bytes on macOS, KB on Linux.
-    raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    return raw / (1024**3) if sys.platform == "darwin" else raw / (1024**2)
+    try:
+        import resource
+        raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return raw / (1024**3) if sys.platform == "darwin" else raw / (1024**2)
+    except ImportError:
+        # Fallback for Windows
+        import psutil
+        import os
+        process = psutil.Process(os.getpid())
+        return process.memory_info().rss / (1024**3)
 
 
 MEMORY_CEILING_GB = 11.0  # hard abort if peak RSS exceeds this -- fail cleanly rather than risk another OOM crash
